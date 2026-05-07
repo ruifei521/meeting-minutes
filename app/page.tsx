@@ -209,7 +209,7 @@ export default function Home() {
 
         {/* Footer */}
         <div className="text-center mt-16 text-slate-600 text-sm">
-          Built with 302AI • No account needed • Your files stay private
+          Powered by AI • No account needed • Your files stay private
         </div>
       </div>
     </div>
