@@ -10,11 +10,6 @@ interface ActionItem {
   completed: boolean;
 }
 
-// 清洗文件名，去除 BOM 等特殊字符
-function cleanFilename(name: string): string {
-  return name.replace(/[\uFEFF\u200B\u00A0]/g, '').replace(/[^a-zA-Z0-9._-]/g, '_') || 'audio.mp3';
-}
-
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
@@ -28,6 +23,15 @@ export default function Home() {
   const [copied, setCopied] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // 用干净的文件名构造 File 对象，防止 BOM 等特殊字符导致 SDK 报错
+  async function getCleanFile(f: File): Promise<File> {
+    // 扩展名从原文件名提取
+    const ext = f.name.split('.').pop() || 'mp3';
+    const cleanName = `meeting-audio.${ext}`;
+    const buf = await f.arrayBuffer();
+    return new File([buf], cleanName, { type: f.type });
+  }
+
   const handleSubmit = async () => {
     if (!file) return;
     setLoading(true);
@@ -39,16 +43,16 @@ export default function Home() {
     setUploadProgress('');
 
     try {
-      // Step 1: Upload to Vercel Blob
+      // Step 1: 用干净文件名上传到 Vercel Blob
       setUploadProgress('Uploading file...');
-      const safeName = cleanFilename(file.name);
-      const blob = await upload(safeName, file, {
+      const cleanFile = await getCleanFile(file);
+      const blob = await upload(cleanFile.name, cleanFile, {
         access: 'public',
         handleUploadUrl: '/api/upload',
       });
       setUploadProgress('Processing audio...');
 
-      // Step 2: Call transcribe API with blob URL
+      // Step 2: 调用转录 API
       const res = await fetch('/api/transcribe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
