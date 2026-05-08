@@ -8,7 +8,18 @@ function cleanText(text: string): string {
   return text.replace(/[\uFEFF\u200B\u00A0]/g, '').trim();
 }
 
+// 进度上报工具函数
+async function reportProgress(jobId: string, stage: ProgressStage, message: string, progress: number, extra?: Record<string, any>) {
+  const data = { stage, message, progress, ...extra };
+  await redis.set(`progress:${jobId}`, JSON.stringify(data), { ex: 600 }); // 10分钟过期
+}
+
+type ProgressStage = 'upload' | 'downloading' | 'transcribing' | 'analyzing' | 'saving' | 'done' | 'error';
+
 export async function POST(request: Request) {
+  // 生成 jobId 用于进度追踪
+  const jobId = crypto.randomUUID().slice(0, 8);
+
   try {
     const body = await request.json();
     const { url } = body;
@@ -17,10 +28,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'No URL provided' }, { status: 400 });
     }
 
+    // 报告：开始下载
+    await reportProgress(jobId, 'downloading', 'Downloading audio file from storage...', 10);
+
     // 1. Fetch file from Vercel Blob
     const blobRes = await fetch(url);
     if (!blobRes.ok) {
-      return NextResponse.json({ error: 'Failed to fetch file from storage' }, { status: 500 });
+      await reportProgress(jobId, 'error', 'Failed to download audio file', 0, { error: 'Failed to fetch file from storage' });
+      return NextResponse.json({ error: 'Failed to fetch file from storage', jobId }, { status: 500 });
     }
 
     const blobBuffer = await blobRes.arrayBuffer();
@@ -29,7 +44,8 @@ export async function POST(request: Request) {
     // Check file size (50MB max for Blob)
     const MAX_SIZE = 50 * 1024 * 1024;
     if (buffer.length > MAX_SIZE) {
-      return NextResponse.json({ error: 'File too large. Max 50MB allowed.' }, { status: 400 });
+      await reportProgress(jobId, 'error', 'File too large', 0, { error: 'File too large. Max 50MB allowed.' });
+      return NextResponse.json({ error: 'File too large. Max 50MB allowed.', jobId }, { status: 400 });
     }
 
     // Get filename from URL
@@ -39,8 +55,10 @@ export async function POST(request: Request) {
     // ⚠️ 关键：清理 API Key 中可能存在的 BOM 字符
     const cleanKey = (process.env.OPENAI_API_KEY || '').replace(/[\uFEFF\u200B]/g, '');
 
+    // 报告：开始转录（这是最耗时的步骤）
+    await reportProgress(jobId, 'transcribing', 'Transcribing audio with AI (this may take a moment)...', 25);
+
     // 2. Call 302AI Whisper for transcription
-    // ⚠️ 关键：手动构建 multipart 请求体，避免 FormData 的 ByteString 兼容性问题
     const boundary = '----FormBoundary' + Math.random().toString(36).slice(2);
     const headerPart = '--' + boundary + '\r\n'
       + 'Content-Disposition: form-data; name="file"; filename="audio.mp3"\r\n'
@@ -70,7 +88,8 @@ export async function POST(request: Request) {
 
     if (!whisperRes.ok) {
       const errText = await whisperRes.text();
-      return NextResponse.json({ error: `Whisper error: ${errText}` }, { status: 500 });
+      await reportProgress(jobId, 'error', 'Transcription failed', 40, { error: `Whisper error: ${errText}` });
+      return NextResponse.json({ error: `Whisper error: ${errText}`, jobId }, { status: 500 });
     }
 
     const whisperData = await whisperRes.json();
@@ -78,8 +97,12 @@ export async function POST(request: Request) {
     const transcript = cleanText(rawTranscript);
 
     if (!transcript || transcript.trim().length < 10) {
-      return NextResponse.json({ error: 'Transcription failed or audio was too short.' }, { status: 500 });
+      await reportProgress(jobId, 'error', 'Audio too short or unclear', 50, { error: 'Transcription failed or audio was too short.' });
+      return NextResponse.json({ error: 'Transcription failed or audio was too short.', jobId }, { status: 500 });
     }
+
+    // 报告：转录完成，开始 AI 分析
+    await reportProgress(jobId, 'analyzing', 'AI is analyzing and structuring your meeting notes...', 60);
 
     // 3. Call GPT for structured minutes + action items
     const prompt = `You are a professional meeting minute writer. Analyze the transcript below.
@@ -120,7 +143,8 @@ ${transcript}`;
 
     if (!gptRes.ok) {
       const errText = await gptRes.text();
-      return NextResponse.json({ error: `GPT error: ${errText}` }, { status: 500 });
+      await reportProgress(jobId, 'error', 'AI analysis failed', 70, { error: `GPT error: ${errText}` });
+      return NextResponse.json({ error: `GPT error: ${errText}`, jobId }, { status: 500 });
     }
 
     const gptData = await gptRes.json();
@@ -132,12 +156,31 @@ ${transcript}`;
       const cleaned = rawContent.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
       parsed = JSON.parse(cleaned);
     } catch {
-      return NextResponse.json({
+      await reportProgress(jobId, 'saving', 'Saving meeting data...', 85);
+      // GPT 返回了非 JSON，返回原始内容
+      const fallbackId = crypto.randomUUID().slice(0, 8);
+      await redis.set(`meeting:${fallbackId}`, JSON.stringify({
+        id: fallbackId,
+        summary: '',
+        decisions: [],
+        actionItems: [],
+        transcript,
+        createdAt: Date.now(),
+      }), { ex: 30 * 24 * 60 * 60 });
+
+      const result = {
         transcript,
         result: rawContent,
         shareUrl: null,
-      });
+        shareId: null,
+        jobId,
+      };
+      await reportProgress(jobId, 'done', 'Done!', 100, { result });
+      return NextResponse.json(result);
     }
+
+    // 报告：保存数据
+    await reportProgress(jobId, 'saving', 'Saving your meeting minutes...', 90);
 
     // 4. Generate unique ID and store in Redis
     const id = crypto.randomUUID().slice(0, 8);
@@ -159,7 +202,7 @@ ${transcript}`;
 
     const resultText = `## Summary\n${meetingData.summary}\n\n## Key Decisions\n${meetingData.decisions.map((d, i) => `${i + 1}. ${d}`).join('\n')}\n\n## Action Items\n${meetingData.actionItems.map(a => `• ${a.task} | Owner: ${a.owner} | Status: ${a.completed ? '✅ Done' : '⏳ Pending'}`).join('\n')}`;
 
-    return NextResponse.json({
+    const result = {
       transcript,
       result: resultText,
       summary: meetingData.summary,
@@ -167,9 +210,16 @@ ${transcript}`;
       shareId: id,
       actionItems: meetingData.actionItems,
       shareUrl: `/minutes/${id}`,
-    });
+      jobId,
+    };
+
+    // 报告：完成！
+    await reportProgress(jobId, 'done', 'Meeting minutes ready! 🎉', 100, { result });
+
+    return NextResponse.json(result);
 
   } catch (error: any) {
-    return NextResponse.json({ error: error.message || 'Unknown error' }, { status: 500 });
+    await reportProgress(jobId, 'error', 'An unexpected error occurred', 0, { error: error.message || 'Unknown error' });
+    return NextResponse.json({ error: error.message || 'Unknown error', jobId }, { status: 500 });
   }
 }
