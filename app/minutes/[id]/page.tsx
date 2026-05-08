@@ -26,6 +26,12 @@ export default function MinutesPage() {
   const [meeting, setMeeting] = useState<MeetingData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+
+  // 动态获取当前域名，避免硬编码
+  const shareUrl = typeof window !== 'undefined'
+    ? `${window.location.origin}/minutes/${id}`
+    : `/minutes/${id}`;
 
   useEffect(() => {
     fetchMeeting();
@@ -57,9 +63,14 @@ export default function MinutesPage() {
       const data = await res.json();
       if (data.success && meeting) {
         setMeeting({ ...meeting, actionItems: data.actionItems });
+      } else {
+        setToast(data.error || 'Failed to update action item');
+        setTimeout(() => setToast(null), 3000);
       }
     } catch (err) {
       console.error('Failed to toggle:', err);
+      setToast('Network error — please check your connection and try again');
+      setTimeout(() => setToast(null), 3000);
     }
   };
 
@@ -105,6 +116,13 @@ export default function MinutesPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 text-white">
+      {/* Toast 通知 */}
+      {toast && (
+        <div className="fixed top-4 right-4 z-50 bg-red-500/90 text-white px-5 py-3 rounded-lg shadow-lg text-sm animate-fade-in flex items-center gap-2">
+          ⚠️ {toast}
+        </div>
+      )}
+
       <div className="max-w-3xl mx-auto px-4 py-12">
 
         {/* Header */}
@@ -228,12 +246,12 @@ export default function MinutesPage() {
             <input
               type="text"
               readOnly
-              value={`https://meeting-minutes-mocha.vercel.app/minutes/${id}`}
+              value={shareUrl}
               className="bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-300 w-80"
             />
             <button
               onClick={() => {
-                navigator.clipboard.writeText(`https://meeting-minutes-mocha.vercel.app/minutes/${id}`);
+                navigator.clipboard.writeText(shareUrl);
               }}
               className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
             >
