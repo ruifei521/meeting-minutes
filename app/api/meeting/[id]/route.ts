@@ -13,13 +13,14 @@ export async function GET(
     }
 
     const redis = getRedis();
-    const data = await redis.get(`meeting:${id}`) as string | null;
+    const raw = await redis.get(`meeting:${id}`);
 
-    if (!data) {
+    if (!raw) {
       return NextResponse.json({ error: 'Meeting not found or expired' }, { status: 404 });
     }
 
-    const meeting: MeetingData = JSON.parse(data);
+    // Upstash Redis 可能自动解析 JSON，需兼容字符串和对象两种情况
+    const meeting: MeetingData = typeof raw === 'string' ? JSON.parse(raw) : raw;
 
     return NextResponse.json(meeting);
 

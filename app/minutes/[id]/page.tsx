@@ -72,8 +72,8 @@ export default function MinutesPage() {
     });
   };
 
-  const completedCount = meeting?.actionItems.filter(a => a.completed).length || 0;
-  const totalCount = meeting?.actionItems.length || 0;
+  const completedCount = meeting?.actionItems?.filter(a => a.completed)?.length ?? 0;
+  const totalCount = meeting?.actionItems?.length ?? 0;
   const progressPercent = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
 
   if (loading) {

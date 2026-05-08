@@ -11,15 +11,13 @@ export async function POST(request: Request) {
 
     const redis = getRedis();
 
-    // Get current data
-    const data = await redis.get(`meeting:${meetingId}`) as string | null;
-    if (!data) {
+    const raw = await redis.get(`meeting:${meetingId}`);
+    if (!raw) {
       return NextResponse.json({ error: 'Meeting not found' }, { status: 404 });
     }
 
-    const meeting: MeetingData = JSON.parse(data);
+    const meeting: MeetingData = typeof raw === 'string' ? JSON.parse(raw) : raw;
 
-    // Toggle the action item
     const actionIndex = meeting.actionItems.findIndex(a => a.id === actionId);
     if (actionIndex === -1) {
       return NextResponse.json({ error: 'Action item not found' }, { status: 404 });
@@ -27,7 +25,7 @@ export async function POST(request: Request) {
 
     meeting.actionItems[actionIndex].completed = !meeting.actionItems[actionIndex].completed;
 
-    // Save back to Redis (keeping 30-day TTL)
+    // 保持 30 天 TTL
     await redis.set(`meeting:${meetingId}`, JSON.stringify(meeting), { ex: 30 * 24 * 60 * 60 });
 
     return NextResponse.json({
