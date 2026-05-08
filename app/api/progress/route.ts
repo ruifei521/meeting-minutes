@@ -2,12 +2,11 @@ import { redis } from '@/lib/redis';
 
 export const dynamic = 'force-dynamic';
 
-// 进度数据结构
 interface ProgressData {
-  stage: 'upload' | 'downloading' | 'transcribing' | 'analyzing' | 'saving' | 'done' | 'error';
+  stage: string;
   message: string;
-  progress: number; // 0-100
-  result?: any;      // 完成后的结果数据
+  progress: number;
+  result?: any;
   error?: string;
 }
 
@@ -22,6 +21,8 @@ export async function GET(request: Request) {
     });
   }
 
+  const signal = request.signal;
+
   // SSE 响应流
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -29,22 +30,18 @@ export async function GET(request: Request) {
       // 发送初始连接确认
       controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'connected' })}\n\n`));
 
-      let lastStage = '';
       let attempts = 0;
-      const maxAttempts = 300; // 最多轮询 5 分钟（每秒一次）
+      const maxAttempts = 600; // 最多 5 分钟（每 500ms 一次）
 
-      // 轮询 Redis 获取进度
-      while (attempts < maxAttempts) {
+      while (attempts < maxAttempts && !signal.aborted) {
         attempts++;
-        await new Promise(resolve => setTimeout(resolve, 1000)); // 每秒查询一次
+        await new Promise(resolve => setTimeout(resolve, 500)); // 每 500ms 查询一次（更快响应）
 
         try {
           const raw = await redis.get(`progress:${jobId}`);
 
           if (!raw) {
-            // 还没有进度数据，继续等待
-            if (attempts % 10 === 0) {
-              // 每10秒发一个心跳，防止连接超时
+            if (attempts % 20 === 0) { // 每 10 秒发心跳
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'heartbeat', attempts })}\n\n`));
             }
             continue;
@@ -52,19 +49,12 @@ export async function GET(request: Request) {
 
           const progress: ProgressData = typeof raw === 'string' ? JSON.parse(raw) : raw;
 
-          // 只在阶段变化或完成时推送
-          if (progress.stage !== lastStage || progress.stage === 'done' || progress.stage === 'error') {
-            lastStage = progress.stage;
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(progress)}\n\n`));
+          // 始终推送最新进度（不再只推送阶段变化）
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(progress)}\n\n`));
 
-            if (progress.stage === 'done' || progress.stage === 'error') {
-              // 完成或出错，关闭流
-              controller.close();
-              return;
-            }
-          } else {
-            // 同阶段时也定期推送更新（带当前百分比）
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(progress)}\n\n`));
+          if (progress.stage === 'done' || progress.stage === 'error') {
+            controller.close();
+            return;
           }
         } catch (err) {
           console.error('Progress poll error:', err);
@@ -76,7 +66,12 @@ export async function GET(request: Request) {
         }
       }
 
-      // 超时
+      // 超时或客户端断连
+      if (signal.aborted) {
+        controller.close();
+        return;
+      }
+
       controller.enqueue(encoder.encode(
         `data: ${JSON.stringify({ stage: 'error', message: 'Processing timeout - please try again', progress: 0, error: 'timeout' })}\n\n`
       ));

@@ -11,13 +11,57 @@ function cleanText(text: string): string {
 // 进度上报工具函数
 async function reportProgress(jobId: string, stage: ProgressStage, message: string, progress: number, extra?: Record<string, any>) {
   const data = { stage, message, progress, ...extra };
-  await redis.set(`progress:${jobId}`, JSON.stringify(data), { ex: 600 }); // 10分钟过期
+  await redis.set(`progress:${jobId}`, JSON.stringify(data), { ex: 600 });
+}
+
+// 带自动推进的长耗时操作包装器
+// 在执行 fn 的同时，每隔 intervalMs 向 Redis 写入递增的进度
+async function withAutoProgress<T>(
+  jobId: string,
+  stage: ProgressStage,
+  message: string,
+  startProgress: number,
+  endProgress: number,
+  fn: () => Promise<T>,
+  intervalMs: number = 2000,
+): Promise<T> {
+  // 先写入起始进度
+  await reportProgress(jobId, stage, message, startProgress);
+
+  let resolved = false;
+  let result: T;
+  let err: any;
+
+  // 同时启动：实际任务 + 定时进度推进
+  const taskPromise = fn().then(r => { resolved = true; return r; }).catch(e => { resolved = true; throw e; });
+
+  // 定时推进：每 2 秒往目标靠近一点
+  const totalRange = endProgress - startProgress;
+  let current = startProgress;
+  const progressTimer = setInterval(async () => {
+    if (resolved) return;
+    current += totalRange * (intervalMs / 30000); // 假设该阶段最多30秒，按比例分配
+    if (current >= endProgress - 2) current = endProgress - 2; // 不超过终点-2，留给最终确认
+    try {
+      await reportProgress(jobId, stage, message, Math.round(current));
+    } catch { /* ignore */ }
+  }, intervalMs);
+
+  try {
+    result = await taskPromise;
+  } catch (e) {
+    err = e;
+  } finally {
+    clearInterval(progressTimer);
+  }
+
+  if (err) throw err;
+  return result!;
 }
 
 type ProgressStage = 'upload' | 'downloading' | 'transcribing' | 'analyzing' | 'saving' | 'done' | 'error';
 
 export async function POST(request: Request) {
-  // 生成 jobId 用于进度追踪
   const jobId = crypto.randomUUID().slice(0, 8);
 
   try {
@@ -29,83 +73,93 @@ export async function POST(request: Request) {
     }
 
     // 报告：开始下载
-    await reportProgress(jobId, 'downloading', 'Downloading audio file from storage...', 10);
+    await reportProgress(jobId, 'downloading', 'Downloading audio file...', 5);
 
-    // 1. Fetch file from Vercel Blob
-    const blobRes = await fetch(url);
-    if (!blobRes.ok) {
-      await reportProgress(jobId, 'error', 'Failed to download audio file', 0, { error: 'Failed to fetch file from storage' });
+    // 1. Fetch file from Vercel Blob (带自动推进)
+    let blobRes: Response;
+    let blobBuffer: ArrayBuffer;
+    try {
+      blobRes = await withAutoProgress(jobId, 'downloading', 'Downloading audio file from storage...', 5, 15, async () => {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Failed to fetch: ${res.status}`);
+        return res;
+      });
+      blobBuffer = await blobRes.arrayBuffer();
+    } catch (fetchErr: unknown) {
+      const fetchMsg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+      await reportProgress(jobId, 'error', 'Failed to download audio file', 0, { error: fetchMsg || 'Failed to fetch file from storage' });
       return NextResponse.json({ error: 'Failed to fetch file from storage', jobId }, { status: 500 });
     }
 
-    const blobBuffer = await blobRes.arrayBuffer();
     const buffer = Buffer.from(blobBuffer);
-
-    // Check file size (50MB max for Blob)
     const MAX_SIZE = 50 * 1024 * 1024;
     if (buffer.length > MAX_SIZE) {
       await reportProgress(jobId, 'error', 'File too large', 0, { error: 'File too large. Max 50MB allowed.' });
       return NextResponse.json({ error: 'File too large. Max 50MB allowed.', jobId }, { status: 400 });
     }
 
-    // Get filename from URL
     const filename = url.split('/').pop()?.split('?')[0] || 'audio.mp3';
     const mimeType = blobRes.headers.get('content-type') || 'audio/mpeg';
 
-    // ⚠️ 关键：清理 API Key 中可能存在的 BOM 字符
     const cleanKey = (process.env.OPENAI_API_KEY || '').replace(/[\uFEFF\u200B]/g, '');
 
-    // 报告：开始转录（这是最耗时的步骤）
-    await reportProgress(jobId, 'transcribing', 'Transcribing audio with AI (this may take a moment)...', 25);
+    // 2. Call Whisper for transcription (带自动推进 — 最耗时的步骤)
+    let whisperData: any;
+    try {
+      whisperData = await withAutoProgress(jobId, 'transcribing', 'Transcribing audio with AI...', 15, 55, async () => {
+        const boundary = '----FormBoundary' + crypto.randomUUID().replace(/-/g, '');
+        const headerPart = '--' + boundary + '\r\n'
+          + 'Content-Disposition: form-data; name="file"; filename="audio.mp3"\r\n'
+          + 'Content-Type: ' + mimeType + '\r\n\r\n';
+        const modelPart = '\r\n--' + boundary + '\r\n'
+          + 'Content-Disposition: form-data; name="model"\r\n\r\n'
+          + 'whisper-1\r\n'
+          + '--' + boundary + '--\r\n';
 
-    // 2. Call 302AI Whisper for transcription
-    const boundary = '----FormBoundary' + Math.random().toString(36).slice(2);
-    const headerPart = '--' + boundary + '\r\n'
-      + 'Content-Disposition: form-data; name="file"; filename="audio.mp3"\r\n'
-      + 'Content-Type: ' + mimeType + '\r\n\r\n';
-    const modelPart = '\r\n--' + boundary + '\r\n'
-      + 'Content-Disposition: form-data; name="model"\r\n\r\n'
-      + 'whisper-1\r\n'
-      + '--' + boundary + '--\r\n';
+        const encoder = new TextEncoder();
+        const headerBuf = encoder.encode(headerPart);
+        const footerBuf = encoder.encode(modelPart);
+        const audioBytes = new Uint8Array(blobBuffer);
+        const allBytes = new Uint8Array(headerBuf.byteLength + audioBytes.byteLength + footerBuf.byteLength);
+        allBytes.set(headerBuf, 0);
+        allBytes.set(audioBytes, headerBuf.byteLength);
+        allBytes.set(footerBuf, headerBuf.byteLength + audioBytes.byteLength);
 
-    const encoder = new TextEncoder();
-    const headerBuf = encoder.encode(headerPart);
-    const footerBuf = encoder.encode(modelPart);
-    const audioBytes = new Uint8Array(blobBuffer);
-    const allBytes = new Uint8Array(headerBuf.byteLength + audioBytes.byteLength + footerBuf.byteLength);
-    allBytes.set(headerBuf, 0);
-    allBytes.set(audioBytes, headerBuf.byteLength);
-    allBytes.set(footerBuf, headerBuf.byteLength + audioBytes.byteLength);
+        const whisperRes = await fetch('https://api.302.ai/v1/audio/transcriptions', {
+          method: 'POST',
+          headers: {
+            'Authorization': 'Bearer ' + cleanKey,
+            'Content-Type': 'multipart/form-data; boundary=' + boundary,
+          },
+          body: allBytes.buffer,
+        });
 
-    const whisperRes = await fetch('https://api.302.ai/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer ' + cleanKey,
-        'Content-Type': 'multipart/form-data; boundary=' + boundary,
-      },
-      body: allBytes.buffer,
-    });
+        if (!whisperRes.ok) {
+          const errText = await whisperRes.text();
+          throw new Error(`Whisper API error: ${errText}`);
+        }
 
-    if (!whisperRes.ok) {
-      const errText = await whisperRes.text();
-      await reportProgress(jobId, 'error', 'Transcription failed', 40, { error: `Whisper error: ${errText}` });
-      return NextResponse.json({ error: `Whisper error: ${errText}`, jobId }, { status: 500 });
+        return await whisperRes.json();
+      });
+    } catch (whisperErr: unknown) {
+      const whisperMsg = whisperErr instanceof Error ? whisperErr.message : String(whisperErr);
+      await reportProgress(jobId, 'error', 'Transcription failed', 40, { error: whisperMsg || 'Whisper transcription failed' });
+      return NextResponse.json({ error: whisperMsg || 'Whisper transcription failed', jobId }, { status: 500 });
     }
 
-    const whisperData = await whisperRes.json();
     const rawTranscript = whisperData.text as string;
     const transcript = cleanText(rawTranscript);
 
     if (!transcript || transcript.trim().length < 10) {
-      await reportProgress(jobId, 'error', 'Audio too short or unclear', 50, { error: 'Transcription failed or audio was too short.' });
+      await reportProgress(jobId, 'error', 'Audio too short or unclear', 55, { error: 'Transcription failed or audio was too short.' });
       return NextResponse.json({ error: 'Transcription failed or audio was too short.', jobId }, { status: 500 });
     }
 
-    // 报告：转录完成，开始 AI 分析
-    await reportProgress(jobId, 'analyzing', 'AI is analyzing and structuring your meeting notes...', 60);
-
-    // 3. Call GPT for structured minutes + action items
-    const prompt = `You are a professional meeting minute writer. Analyze the transcript below.
+    // 3. Call GPT for structured minutes (带自动推进)
+    let gptData: any;
+    try {
+      gptData = await withAutoProgress(jobId, 'analyzing', 'AI is analyzing and structuring your meeting notes...', 55, 85, async () => {
+        const prompt = `You are a professional meeting minute writer. Analyze the transcript below.
 
 Return a JSON object with EXACTLY this structure (no markdown, no code blocks, just raw JSON):
 {
@@ -127,27 +181,33 @@ Rules:
 Transcript:
 ${transcript}`;
 
-    const gptRes = await fetch('https://api.302.ai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer ' + cleanKey,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.3,
-        response_format: { type: 'json_object' },
-      }),
-    });
+        const gptRes = await fetch('https://api.302.ai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': 'Bearer ' + cleanKey,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'gpt-4o-mini',
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.3,
+            response_format: { type: 'json_object' },
+          }),
+        });
 
-    if (!gptRes.ok) {
-      const errText = await gptRes.text();
-      await reportProgress(jobId, 'error', 'AI analysis failed', 70, { error: `GPT error: ${errText}` });
-      return NextResponse.json({ error: `GPT error: ${errText}`, jobId }, { status: 500 });
+        if (!gptRes.ok) {
+          const errText = await gptRes.text();
+          throw new Error(`GPT API error: ${errText}`);
+        }
+
+        return await gptRes.json();
+      });
+    } catch (gptErr: unknown) {
+      const gptMsg = gptErr instanceof Error ? gptErr.message : String(gptErr);
+      await reportProgress(jobId, 'error', 'AI analysis failed', 70, { error: gptMsg || 'GPT analysis failed' });
+      return NextResponse.json({ error: gptMsg || 'GPT analysis failed', jobId }, { status: 500 });
     }
 
-    const gptData = await gptRes.json();
     const rawContent = gptData.choices[0].message.content;
 
     // Parse GPT response
@@ -156,8 +216,8 @@ ${transcript}`;
       const cleaned = rawContent.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
       parsed = JSON.parse(cleaned);
     } catch {
-      await reportProgress(jobId, 'saving', 'Saving meeting data...', 85);
-      // GPT 返回了非 JSON，返回原始内容
+      // GPT 返回非 JSON → 降级处理
+      await reportProgress(jobId, 'saving', 'Saving meeting data...', 90);
       const fallbackId = crypto.randomUUID().slice(0, 8);
       await redis.set(`meeting:${fallbackId}`, JSON.stringify({
         id: fallbackId,
@@ -182,7 +242,7 @@ ${transcript}`;
     // 报告：保存数据
     await reportProgress(jobId, 'saving', 'Saving your meeting minutes...', 90);
 
-    // 4. Generate unique ID and store in Redis
+    // 4. Store in Redis
     const id = crypto.randomUUID().slice(0, 8);
     const meetingData: MeetingData = {
       id,
@@ -213,13 +273,14 @@ ${transcript}`;
       jobId,
     };
 
-    // 报告：完成！
+    // 完成！
     await reportProgress(jobId, 'done', 'Meeting minutes ready! 🎉', 100, { result });
 
     return NextResponse.json(result);
 
-  } catch (error: any) {
-    await reportProgress(jobId, 'error', 'An unexpected error occurred', 0, { error: error.message || 'Unknown error' });
-    return NextResponse.json({ error: error.message || 'Unknown error', jobId }, { status: 500 });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    await reportProgress(jobId, 'error', 'An unexpected error occurred', 0, { error: message });
+    return NextResponse.json({ error: message, jobId }, { status: 500 });
   }
 }
