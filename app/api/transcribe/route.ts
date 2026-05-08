@@ -66,7 +66,7 @@ export async function POST(request: Request) {
 
 Return a JSON object with EXACTLY this structure (no markdown, no code blocks, just raw JSON):
 {
-  "summary": "A concise summary in 80-100 words",
+  "summary": "A concise summary in 80-100 words, in the SAME LANGUAGE as the transcript",
   "decisions": ["Decision 1", "Decision 2"],
   "actionItems": [
     {"task": "Description of task", "owner": "Person name or Unassigned", "deadline": "Date or Not specified"}
@@ -78,6 +78,7 @@ Rules:
 - Be specific about what needs to be done
 - Include the person responsible if mentioned
 - summary should cover main topics and meeting purpose
+- Respond in the same language as the transcript (Chinese if transcript is in Chinese)
 
 ---
 Transcript:
@@ -93,6 +94,7 @@ ${transcript}`;
         model: 'gpt-4o-mini',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.3,
+        response_format: { type: 'json_object' },
       }),
     });
 
@@ -141,6 +143,8 @@ ${transcript}`;
     return NextResponse.json({
       transcript,
       result: resultText,
+      summary: meetingData.summary,
+      decisions: meetingData.decisions,
       filename: safeFilename,
       shareId: id,
       actionItems: meetingData.actionItems,

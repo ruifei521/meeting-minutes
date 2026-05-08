@@ -18,7 +18,10 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
+  const [summary, setSummary] = useState<string | null>(null);
+  const [decisions, setDecisions] = useState<string[]>([]);
   const [actionItems, setActionItems] = useState<ActionItem[]>([]);
+  const [meetingId, setMeetingId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -29,6 +32,9 @@ export default function Home() {
     setResult(null);
     setTranscript(null);
     setShareUrl(null);
+    setMeetingId(null);
+    setSummary(null);
+    setDecisions([]);
     setActionItems([]);
     setUploadProgress('');
 
@@ -67,6 +73,9 @@ export default function Home() {
 
       setResult(data.result);
       setTranscript(data.transcript);
+      setSummary(data.summary || null);
+      setDecisions(data.decisions || []);
+      setMeetingId(data.shareId || null);
       if (data.shareUrl) {
         setShareUrl(`https://meeting-minutes-mocha.vercel.app${data.shareUrl}`);
       }
@@ -94,6 +103,7 @@ export default function Home() {
   };
 
   const toggleAction = async (actionId: string) => {
+    if (!meetingId) return;
     setActionItems(prev => prev.map(item =>
       item.id === actionId ? { ...item, completed: !item.completed } : item
     ));
@@ -101,7 +111,7 @@ export default function Home() {
       await fetch('/api/toggle-action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ actionId }),
+        body: JSON.stringify({ meetingId, actionId }),
       });
     } catch {}
   };
@@ -192,38 +202,83 @@ export default function Home() {
             )}
 
             {actionItems.length > 0 && (
-              <div className="p-4 bg-slate-700/50 rounded-lg">
-                <h3 className="font-semibold mb-3 text-lg">📋 Action Items</h3>
-                <div className="space-y-2">
-                  {actionItems.map((item) => (
-                    <label key={item.id} className="flex items-start gap-3 p-3 bg-slate-800/50 rounded cursor-pointer hover:bg-slate-800">
-                      <input
-                        type="checkbox"
-                        checked={item.completed}
-                        onChange={() => toggleAction(item.id)}
-                        className="mt-1 w-4 h-4 rounded"
-                      />
-                      <div className={item.completed ? 'line-through text-slate-500' : ''}>
-                        <p className="font-medium">{item.task}</p>
-                        <p className="text-sm text-slate-400">Owner: {item.owner}</p>
+              <div className="p-6 bg-slate-800/70 rounded-xl border border-slate-700">
+                <h3 className="font-semibold text-lg mb-4 flex items-center gap-2">
+                  ✅ 行动事项
+                  <span className="text-sm font-normal text-slate-500">
+                    ({actionItems.filter(a => a.completed).length}/{actionItems.length} 已完成)
+                  </span>
+                </h3>
+                <ul className="space-y-3">
+                  {actionItems.map((action) => (
+                    <li
+                      key={action.id}
+                      onClick={() => toggleAction(action.id)}
+                      className={`p-4 rounded-lg border cursor-pointer transition-all ${
+                        action.completed
+                          ? 'bg-green-500/10 border-green-500/30'
+                          : 'bg-slate-700/50 border-slate-600 hover:border-slate-500'
+                      }`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className={`mt-1 w-5 h-5 rounded border-2 flex items-center justify-center transition-colors ${
+                          action.completed
+                            ? 'bg-green-500 border-green-500'
+                            : 'border-slate-500'
+                        }`}>
+                          {action.completed && <span className="text-xs">✓</span>}
+                        </div>
+                        <div className="flex-1">
+                          <p className={`font-medium ${action.completed ? 'line-through text-slate-500' : 'text-white'}`}>
+                            {action.task}
+                          </p>
+                          <p className="text-sm text-slate-500 mt-1">
+                            👤 {action.owner}
+                          </p>
+                        </div>
                       </div>
-                    </label>
+                    </li>
                   ))}
-                </div>
+                </ul>
               </div>
             )}
 
-            <div className="p-6 bg-slate-700/50 rounded-lg">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="font-semibold text-lg">📝 Meeting Minutes</h3>
+            {summary && (
+              <div className="p-6 bg-slate-800/70 rounded-xl border border-slate-700">
+                <h3 className="font-semibold text-lg mb-3 flex items-center gap-2">
+                  📝 会议纪要
+                </h3>
+                <p className="text-slate-300 leading-relaxed">{summary}</p>
+              </div>
+            )}
+
+            {decisions.length > 0 && (
+              <div className="p-6 bg-slate-800/70 rounded-xl border border-slate-700">
+                <h3 className="font-semibold text-lg mb-3 flex items-center gap-2">
+                  🎯 关键决策
+                </h3>
+                <ul className="space-y-2">
+                  {decisions.map((decision, idx) => (
+                    <li key={idx} className="text-slate-300 flex items-start gap-2">
+                      <span className="text-blue-400 mt-1">•</span>
+                      {decision}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <div className="p-4 bg-slate-700/50 rounded-lg">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-semibold text-lg">📋 完整文本</h3>
                 <button
                   onClick={copyResult}
                   className="px-4 py-2 bg-slate-600 hover:bg-slate-500 rounded text-sm"
                 >
-                  Copy All
+                  复制全文
                 </button>
               </div>
-              <pre className="whitespace-pre-wrap text-slate-300 text-sm font-mono">{result}</pre>
+              <pre className="whitespace-pre-wrap text-slate-400 text-sm font-mono max-h-96 overflow-y-auto">{result}</pre>
             </div>
 
             {transcript && (
