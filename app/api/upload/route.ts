@@ -1,28 +1,38 @@
-import { handleUpload, type HandleUploadBody } from '@vercel/blob/client';
+import { put } from '@vercel/blob';
 import { NextResponse } from 'next/server';
 
-// 强制将文件名中的非ASCII字符替换为下划线，防止 BOM 等字符导致 SDK 报错
 function cleanPathname(name: string): string {
   return name.replace(/[\uFEFF\u200B\u00A0]/g, '').replace(/[^a-zA-Z0-9._-]/g, '_') || 'audio';
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
-  const body = (await request.json()) as HandleUploadBody;
-
   try {
-    const jsonResponse = await handleUpload({
-      body,
-      request,
-      onBeforeGenerateToken: async (pathname) => {
-        const clean = cleanPathname(pathname);
-        return {
-          allowedContentTypes: ['audio/mpeg', 'audio/wav', 'audio/mp4', 'audio/x-m4a', 'audio/webm', 'audio/ogg'],
-          maximumSizeInBytes: 50 * 1024 * 1024, // 50MB max
-          addRandomSuffix: true,
-        };
-      },
+    const formData = await request.formData();
+    const file = formData.get('file') as File | null;
+
+    if (!file) {
+      return NextResponse.json({ error: 'No file provided' }, { status: 400 });
+    }
+
+    // 限制文件大小 50MB
+    if (file.size > 50 * 1024 * 1024) {
+      return NextResponse.json({ error: 'File too large. Max 50MB.' }, { status: 400 });
+    }
+
+    // 读取文件内容
+    const arrayBuffer = await file.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    // 用干净的文件名上传
+    const ext = file.name.split('.').pop() || 'mp3';
+    const cleanName = `meeting-audio-${Date.now()}.${ext}`;
+
+    const blob = await put(cleanName, buffer, {
+      access: 'public',
+      contentType: file.type || 'audio/mpeg',
     });
-    return NextResponse.json(jsonResponse);
+
+    return NextResponse.json({ url: blob.url });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }

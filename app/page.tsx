@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useRef } from 'react';
-import { upload } from '@vercel/blob/client';
 
 interface ActionItem {
   id: string;
@@ -23,15 +22,6 @@ export default function Home() {
   const [copied, setCopied] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // 用干净的文件名构造 File 对象，防止 BOM 等特殊字符导致 SDK 报错
-  async function getCleanFile(f: File): Promise<File> {
-    // 扩展名从原文件名提取
-    const ext = f.name.split('.').pop() || 'mp3';
-    const cleanName = `meeting-audio.${ext}`;
-    const buf = await f.arrayBuffer();
-    return new File([buf], cleanName, { type: f.type });
-  }
-
   const handleSubmit = async () => {
     if (!file) return;
     setLoading(true);
@@ -43,20 +33,22 @@ export default function Home() {
     setUploadProgress('');
 
     try {
-      // Step 1: 用干净文件名上传到 Vercel Blob
+      // Step 1: 直接上传文件到我们的服务器，由服务器转发到 Vercel Blob
       setUploadProgress('Uploading file...');
-      const cleanFile = await getCleanFile(file);
-      const blob = await upload(cleanFile.name, cleanFile, {
-        access: 'public',
-        handleUploadUrl: '/api/upload',
-      });
+      const formData = new FormData();
+      formData.append('file', file);
+      const uploadRes = await fetch('/api/upload', { method: 'POST', body: formData });
+      const uploadData = await uploadRes.json();
+      if (!uploadRes.ok) throw new Error(uploadData.error || 'Upload failed');
+      const blobUrl = uploadData.url;
+
       setUploadProgress('Processing audio...');
 
       // Step 2: 调用转录 API
       const res = await fetch('/api/transcribe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: blob.url }),
+        body: JSON.stringify({ url: blobUrl }),
       });
 
       const rawText = await res.text();
