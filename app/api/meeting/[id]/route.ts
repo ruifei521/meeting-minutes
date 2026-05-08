@@ -19,8 +19,17 @@ export async function GET(
       return NextResponse.json({ error: 'Meeting not found or expired' }, { status: 404 });
     }
 
-    // Upstash Redis 可能自动解析 JSON，需兼容字符串和对象两种情况
-    const meeting: MeetingData = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    // 兼容 Upstash Redis 可能已自动解析的情况
+    let meeting: MeetingData;
+    try {
+      meeting = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch (parseErr) {
+      // 数据已损坏（如旧代码写入的 "[object Object]"），提示用户重新上传
+      return NextResponse.json(
+        { error: 'Meeting data corrupted, please re-upload the audio file' },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json(meeting);
 

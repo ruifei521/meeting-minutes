@@ -35,7 +35,8 @@ export default function MinutesPage() {
     try {
       const res = await fetch(`/api/meeting/${id}`);
       if (!res.ok) {
-        throw new Error('Meeting not found');
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Meeting not found');
       }
       const data = await res.json();
       setMeeting(data);
@@ -93,7 +94,7 @@ export default function MinutesPage() {
         <div className="text-center">
           <div className="text-6xl mb-4">😕</div>
           <h1 className="text-2xl font-bold mb-2">Meeting Not Found</h1>
-          <p className="text-slate-400">This link may have expired (links last 30 days)</p>
+          <p className="text-slate-400">{error || 'This link may have expired (links last 30 days)'}</p>
           <a href="/" className="mt-6 inline-block text-blue-400 hover:text-blue-300">
             ← Create new meeting minutes
           </a>
