@@ -1,14 +1,26 @@
 'use client';
 
 import { useState, useRef } from 'react';
+import { upload } from '@vercel/blob/client';
+
+interface ActionItem {
+  id: string;
+  task: string;
+  owner: string;
+  completed: boolean;
+}
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<string>('');
   const [result, setResult] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
+  const [actionItems, setActionItems] = useState<ActionItem[]>([]);
+  const [copied, setCopied] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleSubmit = async () => {
@@ -17,29 +29,53 @@ export default function Home() {
     setError(null);
     setResult(null);
     setTranscript(null);
+    setShareUrl(null);
+    setActionItems([]);
+    setUploadProgress('');
 
     try {
-      const formData = new FormData();
-      formData.append('file', file);
+      // Step 1: Upload to Vercel Blob
+      setUploadProgress('Uploading file...');
+      const blob = await upload(file.name, file, {
+        access: 'public',
+        handleUploadUrl: '/api/upload',
+      });
+      setUploadProgress('Processing audio...');
 
+      // Step 2: Call transcribe API with blob URL
       const res = await fetch('/api/transcribe', {
         method: 'POST',
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: blob.url }),
       });
 
-      const data = await res.json();
+      const rawText = await res.text();
+      let data;
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        setError(`Server returned non-JSON (status ${res.status}): ${rawText.slice(0, 200)}`);
+        return;
+      }
 
       if (!res.ok) {
-        setError(data.error || 'Something went wrong');
+        setError(data?.error || `Server error (${res.status})`);
         return;
       }
 
       setResult(data.result);
       setTranscript(data.transcript);
+      if (data.shareUrl) {
+        setShareUrl(`https://meeting-minutes-mocha.vercel.app${data.shareUrl}`);
+      }
+      if (data.actionItems) {
+        setActionItems(data.actionItems);
+      }
     } catch (err: any) {
       setError(err.message);
     } finally {
       setLoading(false);
+      setUploadProgress('');
     }
   };
 
@@ -47,170 +83,159 @@ export default function Home() {
     if (result) navigator.clipboard.writeText(result);
   };
 
+  const copyShareLink = () => {
+    if (shareUrl) {
+      navigator.clipboard.writeText(shareUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  const toggleAction = async (actionId: string) => {
+    setActionItems(prev => prev.map(item =>
+      item.id === actionId ? { ...item, completed: !item.completed } : item
+    ));
+    try {
+      await fetch('/api/toggle-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ actionId }),
+      });
+    } catch {}
+  };
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 text-white">
       <div className="max-w-3xl mx-auto px-4 py-16">
-
-        {/* Header */}
         <div className="text-center mb-12">
-          <h1 className="text-4xl font-bold mb-4">
-            🗒️ AI Meeting Minutes
+          <h1 className="text-4xl font-bold mb-3 bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
+            Meeting Minutes AI
           </h1>
-          <p className="text-slate-400 text-lg">
-            Upload your meeting audio. Get structured notes, decisions, and action items in seconds.
-          </p>
+          <p className="text-slate-400">Upload your meeting audio, get structured minutes + action items</p>
         </div>
 
-        {/* Upload Area */}
         <div
-          className={`border-2 border-dashed rounded-2xl p-12 text-center mb-8 transition-colors cursor-pointer ${
-            dragOver
-              ? 'border-blue-400 bg-blue-500/10'
-              : 'border-slate-600 hover:border-slate-400'
-          }`}
+          onClick={() => fileInputRef.current?.click()}
           onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
           onDragLeave={() => setDragOver(false)}
           onDrop={(e) => {
             e.preventDefault();
             setDragOver(false);
-            const droppedFile = e.dataTransfer.files[0];
-            if (droppedFile && droppedFile.type.startsWith('audio/')) {
-              setFile(droppedFile);
-              setError(null);
-            } else {
-              setError('Please upload an audio file (MP3, M4A, WAV, etc.)');
-            }
+            if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
           }}
-          onClick={() => fileInputRef.current?.click()}
+          className={`border-2 border-dashed rounded-xl p-12 text-center cursor-pointer transition-all ${
+            dragOver ? 'border-blue-400 bg-blue-400/10' : 'border-slate-600 hover:border-slate-400'
+          }`}
         >
           <input
             ref={fileInputRef}
             type="file"
             accept="audio/*"
+            onChange={(e) => e.target.files?.[0] && setFile(e.target.files[0])}
             className="hidden"
-            onChange={(e) => {
-              const selectedFile = e.target.files?.[0] || null;
-              setFile(selectedFile);
-              setError(null);
-            }}
           />
-
-          {file ? (
-            <div className="space-y-3">
-              <div className="text-3xl">🎵</div>
-              <p className="text-white font-medium">{file.name}</p>
-              <p className="text-slate-400 text-sm">
-                {(file.size / 1024 / 1024).toFixed(2)} MB
-              </p>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setFile(null);
-                }}
-                className="text-sm text-slate-500 hover:text-slate-300 underline"
-              >
-                Remove
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <div className="text-5xl mb-4">📎</div>
-              <p className="text-lg text-slate-300">
-                Drag & drop your audio file here
-              </p>
-              <p className="text-slate-500">or click to browse</p>
-              <p className="text-slate-600 text-sm mt-4">
-                Supports MP3, M4A, WAV, WebM • Max 25MB
-              </p>
-            </div>
-          )}
+          <div className="text-5xl mb-4">🎙️</div>
+          <p className="text-slate-300 mb-2">Drop audio file here or click to upload</p>
+          <p className="text-sm text-slate-500">MP3, WAV, M4A, WebM, OGG • Max 50MB</p>
         </div>
 
-        {/* Error */}
+        {file && (
+          <div className="mt-6 p-4 bg-slate-700/50 rounded-lg flex items-center justify-between">
+            <div>
+              <p className="font-medium">{file.name}</p>
+              <p className="text-sm text-slate-400">{formatFileSize(file.size)}</p>
+            </div>
+            <button
+              onClick={handleSubmit}
+              disabled={loading}
+              className="px-6 py-2 bg-blue-500 hover:bg-blue-600 disabled:bg-slate-600 rounded-lg font-medium transition-colors"
+            >
+              {loading ? (uploadProgress || 'Processing...') : 'Generate Minutes'}
+            </button>
+          </div>
+        )}
+
         {error && (
-          <div className="bg-red-500/20 border border-red-500/50 rounded-xl p-4 mb-6 text-red-300 text-sm">
+          <div className="mt-6 p-4 bg-red-900/30 border border-red-700 rounded-lg text-red-300">
             ⚠️ {error}
           </div>
         )}
 
-        {/* Submit Button */}
-        <div className="text-center mb-16">
-          <button
-            onClick={handleSubmit}
-            disabled={!file || loading}
-            className={`px-10 py-4 rounded-xl font-semibold text-lg transition-all ${
-              !file || loading
-                ? 'bg-slate-700 text-slate-500 cursor-not-allowed'
-                : 'bg-blue-600 hover:bg-blue-500 text-white cursor-pointer'
-            }`}
-          >
-            {loading ? (
-              <span className="flex items-center gap-3 justify-center">
-                <span className="animate-spin inline-block">⚙️</span>
-                Transcribing & Analyzing...
-              </span>
-            ) : (
-              '🚀 Generate Meeting Minutes'
-            )}
-          </button>
-          {loading && (
-            <p className="text-slate-500 text-sm mt-3">
-              Usually takes 30-90 seconds depending on audio length
-            </p>
-          )}
-        </div>
-
-        {/* Results */}
         {result && (
-          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-            <div className="bg-slate-800 rounded-2xl p-6">
-              <div className="flex justify-between items-center mb-4">
-                <h2 className="text-xl font-semibold">📝 Meeting Minutes</h2>
+          <div className="mt-8 space-y-6">
+            {shareUrl && (
+              <div className="p-4 bg-green-900/30 border border-green-700 rounded-lg">
+                <p className="text-green-300 text-sm mb-2">✅ Share link generated:</p>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={shareUrl}
+                    readOnly
+                    className="flex-1 bg-slate-800 px-3 py-2 rounded text-sm text-slate-300"
+                  />
+                  <button
+                    onClick={copyShareLink}
+                    className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded text-sm font-medium"
+                  >
+                    {copied ? '✓ Copied' : 'Copy'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {actionItems.length > 0 && (
+              <div className="p-4 bg-slate-700/50 rounded-lg">
+                <h3 className="font-semibold mb-3 text-lg">📋 Action Items</h3>
+                <div className="space-y-2">
+                  {actionItems.map((item) => (
+                    <label key={item.id} className="flex items-start gap-3 p-3 bg-slate-800/50 rounded cursor-pointer hover:bg-slate-800">
+                      <input
+                        type="checkbox"
+                        checked={item.completed}
+                        onChange={() => toggleAction(item.id)}
+                        className="mt-1 w-4 h-4 rounded"
+                      />
+                      <div className={item.completed ? 'line-through text-slate-500' : ''}>
+                        <p className="font-medium">{item.task}</p>
+                        <p className="text-sm text-slate-400">Owner: {item.owner}</p>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="p-6 bg-slate-700/50 rounded-lg">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-semibold text-lg">📝 Meeting Minutes</h3>
                 <button
                   onClick={copyResult}
-                  className="text-sm text-blue-400 hover:text-blue-300 flex items-center gap-1 transition-colors"
+                  className="px-4 py-2 bg-slate-600 hover:bg-slate-500 rounded text-sm"
                 >
-                  📋 Copy to clipboard
+                  Copy All
                 </button>
               </div>
-              <pre className="whitespace-pre-wrap text-slate-300 text-sm leading-relaxed font-mono bg-slate-900 p-4 rounded-xl overflow-x-auto">
-                {result}
-              </pre>
+              <pre className="whitespace-pre-wrap text-slate-300 text-sm font-mono">{result}</pre>
             </div>
 
             {transcript && (
-              <details className="bg-slate-800/50 rounded-xl">
-                <summary className="p-4 cursor-pointer text-slate-400 hover:text-slate-300 text-sm">
-                  📄 Show full transcript
+              <details className="p-4 bg-slate-700/50 rounded-lg">
+                <summary className="cursor-pointer font-medium text-slate-400 hover:text-slate-300">
+                  📜 View Full Transcript
                 </summary>
-                <pre className="px-4 pb-4 text-slate-500 text-xs leading-relaxed whitespace-pre-wrap font-mono">
-                  {transcript}
-                </pre>
+                <p className="mt-4 text-sm text-slate-400 whitespace-pre-wrap">{transcript}</p>
               </details>
             )}
-
-            {/* Upgrade CTA */}
-            <div className="bg-gradient-to-r from-amber-500/20 to-orange-500/20 border border-amber-500/30 rounded-2xl p-6 text-center">
-              <p className="text-amber-300 font-medium mb-2">
-                ❤️ Like this tool?
-              </p>
-              <p className="text-slate-400 text-sm mb-4">
-                This is a free MVP. Want unlimited meetings + PDF export?
-              </p>
-              <a
-                href="#"
-                className="inline-block bg-amber-500 hover:bg-amber-400 text-slate-900 font-semibold px-6 py-2 rounded-lg transition-colors"
-              >
-                ☕ Support & Get Early Access
-              </a>
-            </div>
           </div>
         )}
 
-        {/* Footer */}
-        <div className="text-center mt-16 text-slate-600 text-sm">
-          Powered by AI • No account needed • Your files stay private
-        </div>
+        <p className="text-center text-slate-500 text-sm mt-12">Powered by AI</p>
       </div>
     </div>
   );
