@@ -10,6 +10,11 @@ interface ActionItem {
   completed: boolean;
 }
 
+// 清洗文件名，去除 BOM 等特殊字符
+function cleanFilename(name: string): string {
+  return name.replace(/[\uFEFF\u200B\u00A0]/g, '').replace(/[^a-zA-Z0-9._-]/g, '_') || 'audio.mp3';
+}
+
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
@@ -36,7 +41,8 @@ export default function Home() {
     try {
       // Step 1: Upload to Vercel Blob
       setUploadProgress('Uploading file...');
-      const blob = await upload(file.name, file, {
+      const safeName = cleanFilename(file.name);
+      const blob = await upload(safeName, file, {
         access: 'public',
         handleUploadUrl: '/api/upload',
       });
