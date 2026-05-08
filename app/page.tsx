@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef } from 'react';
+import { upload } from '@vercel/blob/client';
 
 interface ActionItem {
   id: string;
@@ -39,17 +40,16 @@ export default function Home() {
     setUploadProgress('');
 
     try {
-      // Step 1: 上传文件（用安全文件名避免 BOM 字符问题）
+      // Step 1: 客户端直传 Vercel Blob（绕过服务器 4.5MB 体量限制）
       setUploadProgress('Uploading file...');
-      const formData = new FormData();
-      // 重新包装 File，清除文件名中的 BOM 和特殊字符
-      const safeName = file.name.replace(/[\uFEFF\u200B\u00A0]/g, '').replace(/[^\w.-]/g, '_') || 'audio.mp3';
-      const safeFile = new File([file], safeName, { type: file.type });
-      formData.append('file', safeFile);
-      const uploadRes = await fetch('/api/upload', { method: 'POST', body: formData });
-      const uploadData = await uploadRes.json();
-      if (!uploadRes.ok) throw new Error(uploadData.error || 'Upload failed');
-      const blobUrl = uploadData.url;
+      const ext = (file.name.split('.').pop() || 'mp3').replace(/[^a-zA-Z0-9]/g, '');
+      const randomName = `meeting-${Date.now()}.${ext}`;
+      const blob = new Blob([await file.arrayBuffer()], { type: file.type || 'audio/mpeg' });
+      const uploadResult = await upload(randomName, blob, {
+        access: 'public',
+        handleUploadUrl: '/api/upload',
+      });
+      const blobUrl = uploadResult.url;
 
       setUploadProgress('Processing audio...');
 

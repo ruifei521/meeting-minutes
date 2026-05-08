@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 import { redis, MeetingData } from '@/lib/redis';
 
+export const maxDuration = 300;
+export const dynamic = 'force-dynamic';
+
 function cleanText(text: string): string {
   return text.replace(/[\uFEFF\u200B\u00A0]/g, '').trim();
 }
@@ -33,19 +36,36 @@ export async function POST(request: Request) {
     const filename = url.split('/').pop()?.split('?')[0] || 'audio.mp3';
     const mimeType = blobRes.headers.get('content-type') || 'audio/mpeg';
 
+    // ⚠️ 关键：清理 API Key 中可能存在的 BOM 字符
+    const cleanKey = (process.env.OPENAI_API_KEY || '').replace(/[\uFEFF\u200B]/g, '');
+
     // 2. Call 302AI Whisper for transcription
-    const whisperFormData = new FormData();
-    const fileBlob = new Blob([buffer], { type: mimeType });
-    const safeFilename = filename.replace(/[\uFEFF\u200B\u00A0]/g, '').replace(/[^a-zA-Z0-9._-]/g, '_') || 'audio.mp3';
-    whisperFormData.append('file', fileBlob, safeFilename);
-    whisperFormData.append('model', 'whisper-1');
+    // ⚠️ 关键：手动构建 multipart 请求体，避免 FormData 的 ByteString 兼容性问题
+    const boundary = '----FormBoundary' + Math.random().toString(36).slice(2);
+    const headerPart = '--' + boundary + '\r\n'
+      + 'Content-Disposition: form-data; name="file"; filename="audio.mp3"\r\n'
+      + 'Content-Type: ' + mimeType + '\r\n\r\n';
+    const modelPart = '\r\n--' + boundary + '\r\n'
+      + 'Content-Disposition: form-data; name="model"\r\n\r\n'
+      + 'whisper-1\r\n'
+      + '--' + boundary + '--\r\n';
+
+    const encoder = new TextEncoder();
+    const headerBuf = encoder.encode(headerPart);
+    const footerBuf = encoder.encode(modelPart);
+    const audioBytes = new Uint8Array(blobBuffer);
+    const allBytes = new Uint8Array(headerBuf.byteLength + audioBytes.byteLength + footerBuf.byteLength);
+    allBytes.set(headerBuf, 0);
+    allBytes.set(audioBytes, headerBuf.byteLength);
+    allBytes.set(footerBuf, headerBuf.byteLength + audioBytes.byteLength);
 
     const whisperRes = await fetch('https://api.302.ai/v1/audio/transcriptions', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Authorization': 'Bearer ' + cleanKey,
+        'Content-Type': 'multipart/form-data; boundary=' + boundary,
       },
-      body: whisperFormData,
+      body: allBytes.buffer,
     });
 
     if (!whisperRes.ok) {
@@ -87,7 +107,7 @@ ${transcript}`;
     const gptRes = await fetch('https://api.302.ai/v1/chat/completions', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Authorization': 'Bearer ' + cleanKey,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -115,7 +135,6 @@ ${transcript}`;
       return NextResponse.json({
         transcript,
         result: rawContent,
-        filename: safeFilename,
         shareUrl: null,
       });
     }
@@ -145,7 +164,6 @@ ${transcript}`;
       result: resultText,
       summary: meetingData.summary,
       decisions: meetingData.decisions,
-      filename: safeFilename,
       shareId: id,
       actionItems: meetingData.actionItems,
       shareUrl: `/minutes/${id}`,

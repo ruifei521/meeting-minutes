@@ -1,39 +1,31 @@
-import { put } from '@vercel/blob';
+import { handleUpload, type HandleUploadBody } from '@vercel/blob/client';
 import { NextResponse } from 'next/server';
 
-function cleanPathname(name: string): string {
-  return name.replace(/[\uFEFF\u200B\u00A0]/g, '').replace(/[^a-zA-Z0-9._-]/g, '_') || 'audio';
-}
-
 export async function POST(request: Request): Promise<NextResponse> {
+  const body = (await request.json()) as HandleUploadBody;
+
   try {
-    const formData = await request.formData();
-    const file = formData.get('file') as File | null;
-
-    if (!file) {
-      return NextResponse.json({ error: 'No file provided' }, { status: 400 });
-    }
-
-    // 限制文件大小 50MB
-    if (file.size > 50 * 1024 * 1024) {
-      return NextResponse.json({ error: 'File too large. Max 50MB.' }, { status: 400 });
-    }
-
-    // 读取文件内容
-    const arrayBuffer = await file.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
-    // 用干净的文件名上传
-    const ext = file.name.split('.').pop() || 'mp3';
-    const cleanName = `meeting-audio-${Date.now()}.${ext}`;
-
-    const blob = await put(cleanName, buffer, {
-      access: 'public',
-      contentType: file.type || 'audio/mpeg',
+    const jsonResponse = await handleUpload({
+      body,
+      request,
+      onBeforeGenerateToken: async (pathname) => ({
+        allowedContentTypes: [
+          'audio/mpeg', 'audio/wav', 'audio/mp4', 'audio/webm',
+          'audio/ogg', 'audio/x-m4a', 'audio/aac', 'audio/flac',
+        ],
+        maximumSizeInBytes: 50 * 1024 * 1024,
+        addRandomSuffix: true,
+      }),
+      onUploadCompleted: async ({ blob }) => {
+        console.log('Upload completed:', blob.url);
+      },
     });
 
-    return NextResponse.json({ url: blob.url });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json(jsonResponse);
+  } catch (error) {
+    return NextResponse.json(
+      { error: (error as Error).message },
+      { status: 400 },
+    );
   }
 }

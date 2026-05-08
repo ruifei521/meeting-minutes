@@ -27,8 +27,8 @@ export async function POST(request: Request) {
 
     meeting.actionItems[actionIndex].completed = !meeting.actionItems[actionIndex].completed;
 
-    // Save back to Redis
-    await redis.set(`meeting:${meetingId}`, JSON.stringify(meeting));
+    // Save back to Redis (keeping 30-day TTL)
+    await redis.set(`meeting:${meetingId}`, JSON.stringify(meeting), { ex: 30 * 24 * 60 * 60 });
 
     return NextResponse.json({
       success: true,
