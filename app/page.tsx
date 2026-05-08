@@ -39,10 +39,13 @@ export default function Home() {
     setUploadProgress('');
 
     try {
-      // Step 1: 直接上传文件到我们的服务器，由服务器转发到 Vercel Blob
+      // Step 1: 上传文件（用安全文件名避免 BOM 字符问题）
       setUploadProgress('Uploading file...');
       const formData = new FormData();
-      formData.append('file', file);
+      // 重新包装 File，清除文件名中的 BOM 和特殊字符
+      const safeName = file.name.replace(/[\uFEFF\u200B\u00A0]/g, '').replace(/[^\w.-]/g, '_') || 'audio.mp3';
+      const safeFile = new File([file], safeName, { type: file.type });
+      formData.append('file', safeFile);
       const uploadRes = await fetch('/api/upload', { method: 'POST', body: formData });
       const uploadData = await uploadRes.json();
       if (!uploadRes.ok) throw new Error(uploadData.error || 'Upload failed');
